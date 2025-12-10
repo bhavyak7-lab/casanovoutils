@@ -1,0 +1,32 @@
+[project]
+name = "casanovoutils"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { email = "gwenneth.straub@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "casanovo>=5.1.1",
+    "fire>=0.7.1",
+    "matplotlib>=3.10.7",
+    "numpy>=1.26.4",
+    "polars>=1.35.2",
+    "pyteomics>=4.7.5",
+    "pyyaml>=6.0.3",
+    "tqdm>=4.67.1",
+]
+
+[project.scripts]
+casanovoutils = "casanovoutils:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "black>=25.11.0",
+    "isort>=7.0.0",
+]

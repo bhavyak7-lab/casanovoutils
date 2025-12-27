@@ -182,7 +182,7 @@ def main():
     test_peps = []
     val_peps = []
     extra_peps = []
-
+    
     for peptide in distinct_peptide_and_spectra.keys():
         if peptide in train_baseline_peps:
             train_peps.append(peptide)

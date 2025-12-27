@@ -3,6 +3,7 @@ import random
 import itertools
 import pathlib
 import shutil
+import os
 from os import PathLike
 from typing import Any, Iterable, Optional
 
@@ -10,6 +11,8 @@ import numpy as np
 import tqdm
 import fire
 import pyteomics.mgf
+import logging
+import re
 import pyteomics.mztab
 import matplotlib.pyplot as plt
 import casanovo.denovo.evaluate
@@ -290,6 +293,213 @@ class GraphPrecCov:
         None
         """
         self.fig.show()
+
+@dataclasses.dataclass 
+class TrainTestValidationSplitting: 
+    """
+    Reads from a directory of files and splits it according to the baseline files 
+
+    Parameters 
+    ----------
+    random_seed : int | float, default=42 
+        Random seed used for reproducible shuffling of extra peptides 
+    """
+    random_seed: int | float = 42
+
+    def safe_title(params):
+        """
+        Create a safe title or get title.
+        """
+        if not isinstance(params, dict):
+            return None
+        t = params.get("title")
+        if t:
+            return t
+        if "filename" in params and "scan" in params:
+            return f"{params.get('filename')}:scan:{params.get('scan')}"
+        return None
+
+    def parse_charge(self, charge_info):
+        """
+        Parse charge information
+        """
+        if charge_info is None:
+            return None
+        if isinstance(charge_info, str):
+            m = re.search(r'(\d+)', charge_info)
+            if m:
+                return int(m.group(1))
+            return None
+        if isinstance(charge_info, (list, tuple)):
+            try:
+                return self.parse_charge(charge_info[0])
+            except Exception:
+                return None
+        try:
+            return int(charge_info)
+        except Exception:
+            return None
+
+    def collect_mgf_spectra_from_dir(
+        self,
+        input_dir: PathLike, 
+        allowed_amino_acids: str, 
+        min_peaks: int,
+        max_charge: int,
+    ):
+        """
+        Walks input directory, gets valid spectra, and adds them to dictionary 
+        mapping sequences to their associated spectra.
+        """
+        distinct = {}
+        num_skipped_no_seq = 0
+        skipped_no_title = 0
+        skipped_high_charge = 0
+        num_skipped_peaks = 0
+        allowed_amino_acids = set(allowed_amino_acids)
+
+        for root, dirs, files in os.walk(input_dir):
+            for file in files:
+                if not file.lower().endswith(".mgf"): 
+                    continue
+                file_path = os.path.join(root, file)
+                try:
+                    for spectrum in pyteomics.mgf.read(file_path):
+                        params = spectrum.get("params", {}) or {}
+                        seq = params.get("seq")
+                        cleaned_seq = re.sub(r"[0-9\.\-\+\[\]]+", "", seq).strip().upper()
+                        
+                        if not all(aa in allowed_amino_acids for aa in cleaned_seq):
+                            num_skipped_no_seq += 1 
+                            continue
+
+                        if seq is None:
+                            num_skipped_no_seq += 1
+                            continue
+
+                        mz_arr = spectrum.get("m/z array")
+                        int_arr = spectrum.get("intensity array")
+
+                        if mz_arr is None or int_arr is None:
+                            num_skipped_peaks += 1
+                            continue
+
+                        if len(mz_arr) != len(int_arr):
+                            logging.warning("Found a spectra where the intensity array and m/z array are not of equal size")
+                            num_skipped_peaks += 1
+                            continue
+
+                        if len(mz_arr) < min_peaks:
+                            logging.warning(f"Found spectra with less than {min_peaks} m/z peaks")
+                            num_skipped_peaks += 1
+                            continue
+
+                        if len(int_arr) < min_peaks: 
+                            logging.warning(f"Found spectra with less than {min_peaks} intensity peaks")
+                            num_skipped_peaks += 1
+                            continue
+
+                        title = self.safe_title(params)
+                        if title is None:
+                            skipped_no_title += 1
+                            continue
+                        charge_info = params.get("charge")
+                        charge_val = self.parse_charge(charge_info)
+                        if charge_val > max_charge:
+                            skipped_high_charge += 1
+                            continue
+
+                        if seq not in distinct:
+                            distinct[seq] = []
+                        distinct[seq].append(spectrum)
+
+                except Exception as e:
+                    logging.warning(f"Failed to read {file_path}: {e}")
+
+        logging.warning(f"{num_skipped_no_seq} because of no sequence or because it contained unallowed amino acids")       
+        logging.warning(f"{skipped_no_title} because it had no title")
+        logging.warning(f"{skipped_high_charge} because the charge was too high")
+        logging.warning(f"{skipped_no_title} because it had too little peaks")
+        return distinct
+
+    def write(
+        out_path: PathLike,
+        distinct_peptide_and_spectra: dict[str, list[Any]],  
+        peptide_list: list, 
+        type: str,
+    ):
+        written = 0
+        curr_pep = 0
+        with open(out_path, "w") as f_out:
+            for pep in peptide_list:
+                specs = distinct_peptide_and_spectra.get(pep, [])
+                if specs:
+                    written += len(specs)
+                    curr_pep += 1
+                    pyteomics.mgf.write(specs, f_out)
+        logging.info(f"Wrote {written} spectra (from {len(peptide_list)} peptides) to {out_path} for {type}")
+
+    def split(
+        self,
+        input_dir: PathLike, 
+        allowed_amino_acids: str, 
+        min_peaks: int,
+        max_charge: int,
+        train_split: float, 
+        test_split: float, 
+        train_baseline: PathLike, 
+        test_baseline: PathLike, 
+        validation_baseline: PathLike, 
+        outdir: PathLike, 
+    ): 
+        distinct_peptide_and_spectra = self.collect_mgf_spectra_from_dir(input_dir, allowed_amino_acids, min_peaks, max_charge)
+        train_baseline_peps = get_pep_dict_mgf(train_baseline).keys()
+        test_baseline_peps = get_pep_dict_mgf(test_baseline).keys()
+        val_baseline_peps = get_pep_dict_mgf(validation_baseline).keys()
+
+        train_peps = []
+        test_peps = []
+        val_peps = []
+        extra_peps = []
+        
+        for peptide in distinct_peptide_and_spectra.keys():
+            if peptide in train_baseline_peps:
+                train_peps.append(peptide)
+            elif peptide in test_baseline_peps:
+                test_peps.append(peptide)
+            elif peptide in val_baseline_peps:
+                val_peps.append(peptide)
+            else:
+                extra_peps.append(peptide)
+        
+        random.seed(self.random_seed)
+        random.shuffle(extra_peps)
+        val_split = 1.0 - train_split - test_split 
+
+        num_peptides = len(distinct_peptide_and_spectra)
+        n_train_target = int(train_split * num_peptides)
+        n_val_target = int(val_split * num_peptides)
+        n_test_target = int(test_split * num_peptides)
+
+        # Fill training
+        if len(train_peps) < n_train_target:
+            need = min(n_train_target - len(train_peps), len(extra_peps))
+            train_peps.extend(extra_peps[:need])
+            extra_peps = extra_peps[need:]
+
+        # Fill testing
+        if len(test_peps) < n_test_target:
+            need = min(n_test_target - len(test_peps), len(extra_peps))
+            test_peps.extend(extra_peps[:need])
+            extra_peps = extra_peps[need:]
+
+        # Fill validation
+        if len(val_peps) < n_val_target:
+            need = min(n_val_target - len(val_peps), len(extra_peps))
+            val_peps.extend(extra_peps[:need])
+            extra_peps = extra_peps[need:]
+
+        self.write(train_peps, )
 
 
 @dataclasses.dataclass

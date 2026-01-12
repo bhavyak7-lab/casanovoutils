@@ -5,7 +5,8 @@ import pathlib
 import shutil
 import os
 from os import PathLike
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, List, Dict
+from collections import defaultdict
 
 import numpy as np
 import tqdm
@@ -297,210 +298,124 @@ class GraphPrecCov:
 @dataclasses.dataclass 
 class TrainTestValidationSplitting: 
     """
-    Reads from a directory of files and splits it according to the baseline files 
+    Split MGF files by peptide sequence into train/test/val sets.
 
-    Parameters 
-    ----------
-    random_seed : int | float, default=42 
-        Random seed used for reproducible shuffling of extra peptides 
+    This script recursively finds all MGF files in an input directory, groups
+    spectra by peptide sequence, splits peptides into train/test/val sets, and
+    writes the corresponding spectra to separate output MGF files.
     """
     random_seed: int | float = 42
 
-    def safe_title(params):
+    def find_mgf_files(
+        input_dir: pathlib.Path
+    ) -> Iterable[pathlib.Path]:
         """
-        Create a safe title or get title.
+        Recursively find all MGF files in a directory.
+        
+        Parameters
+        ----------
+        input_dir : pathlib.Path
+            Root directory to search
+            
+        Returns
+        -------
+        List[pathlib.Path]
+            List of paths to MGF files
         """
-        if not isinstance(params, dict):
-            return None
-        t = params.get("title")
-        if t:
-            return t
-        if "filename" in params and "scan" in params:
-            return f"{params.get('filename')}:scan:{params.get('scan')}"
-        return None
+        mgf_files = Iterable(input_dir.rglob("*.mgf"))
+        return mgf_files
 
-    def parse_charge(self, charge_info):
-        """
-        Parse charge information
-        """
-        if charge_info is None:
-            return None
-        if isinstance(charge_info, str):
-            m = re.search(r'(\d+)', charge_info)
-            if m:
-                return int(m.group(1))
-            return None
-        if isinstance(charge_info, (list, tuple)):
-            try:
-                return self.parse_charge(charge_info[0])
-            except Exception:
-                return None
-        try:
-            return int(charge_info)
-        except Exception:
-            return None
-
-    def collect_mgf_spectra_from_dir(
+    def split_peptides(
         self,
-        input_dir: PathLike, 
-        allowed_amino_acids: str, 
-        min_peaks: int,
-        max_charge: int,
-    ):
+        peptides: List[str],
+        train_ratio: float = 0.8,
+        val_ratio: float = 0.1,
+        test_ratio: float = 0.1,
+    ) -> tuple[List[str], List[str], List[str]]:
         """
-        Walks input directory, gets valid spectra, and adds them to dictionary 
-        mapping sequences to their associated spectra.
+        Split peptide sequences into train/val/test sets.
+        
+        Parameters
+        ----------
+        peptides : List[str]
+            List of unique peptide sequences
+        train_ratio : float
+            Fraction of peptides for training set
+        val_ratio : float
+            Fraction of peptides for validation set
+        test_ratio : float
+            Fraction of peptides for test set
+        random_seed : int
+            Random seed for reproducibility
+            
+        Returns
+        -------
+        tuple[List[str], List[str], List[str]]
+            (train_peptides, val_peptides, test_peptides)
         """
-        distinct = {}
-        num_skipped_no_seq = 0
-        skipped_no_title = 0
-        skipped_high_charge = 0
-        num_skipped_peaks = 0
-        allowed_amino_acids = set(allowed_amino_acids)
+        rng = np.random.default_rng(self.random_seed)
+        peptides = list(peptides)
+        rng.shuffle(peptides)
+        
+        n = len(peptides)
+        train_end = int(n * train_ratio)
+        val_end = train_end + int(n * val_ratio)
+        
+        train_peptides = peptides[:train_end]
+        val_peptides = peptides[train_end:val_end]
+        test_peptides = peptides[val_end:]
+        
+        return train_peptides, val_peptides, test_peptides
 
-        for root, dirs, files in os.walk(input_dir):
-            for file in files:
-                if not file.lower().endswith(".mgf"): 
-                    continue
-                file_path = os.path.join(root, file)
-                try:
-                    for spectrum in pyteomics.mgf.read(file_path):
-                        params = spectrum.get("params", {}) or {}
-                        seq = params.get("seq")
-                        cleaned_seq = re.sub(r"[0-9\.\-\+\[\]]+", "", seq).strip().upper()
-                        
-                        if not all(aa in allowed_amino_acids for aa in cleaned_seq):
-                            num_skipped_no_seq += 1 
-                            continue
 
-                        if seq is None:
-                            num_skipped_no_seq += 1
-                            continue
+    def write_split_mgf(
+        peptide_dict: Dict[str, List[Dict[str, Any]]],
+        peptide_list: List[str],
+        output_path: pathlib.Path
+    ) -> None:
+        """
+        Write spectra for a list of peptides to an MGF file.
+        
+        Parameters
+        ----------
+        peptide_dict : Dict[str, List[Dict[str, Any]]]
+            Dictionary mapping peptides to their spectra
+        peptide_list : List[str]
+            List of peptides to include in this split
+        output_path : pathlib.Path
+            Output MGF file path
+        """
+        spectra = []
+        for peptide in peptide_list:
+            spectra.extend(peptide_dict[peptide])
+        
+        print(f"Writing {len(spectra)} spectra to {output_path}")
+        pyteomics.mgf.write(spectra, str(output_path))
 
-                        mz_arr = spectrum.get("m/z array")
-                        int_arr = spectrum.get("intensity array")
-
-                        if mz_arr is None or int_arr is None:
-                            num_skipped_peaks += 1
-                            continue
-
-                        if len(mz_arr) != len(int_arr):
-                            logging.warning("Found a spectra where the intensity array and m/z array are not of equal size")
-                            num_skipped_peaks += 1
-                            continue
-
-                        if len(mz_arr) < min_peaks:
-                            logging.warning(f"Found spectra with less than {min_peaks} m/z peaks")
-                            num_skipped_peaks += 1
-                            continue
-
-                        if len(int_arr) < min_peaks: 
-                            logging.warning(f"Found spectra with less than {min_peaks} intensity peaks")
-                            num_skipped_peaks += 1
-                            continue
-
-                        title = self.safe_title(params)
-                        if title is None:
-                            skipped_no_title += 1
-                            continue
-                        charge_info = params.get("charge")
-                        charge_val = self.parse_charge(charge_info)
-                        if charge_val > max_charge:
-                            skipped_high_charge += 1
-                            continue
-
-                        if seq not in distinct:
-                            distinct[seq] = []
-                        distinct[seq].append(spectrum)
-
-                except Exception as e:
-                    logging.warning(f"Failed to read {file_path}: {e}")
-
-        logging.warning(f"{num_skipped_no_seq} because of no sequence or because it contained unallowed amino acids")       
-        logging.warning(f"{skipped_no_title} because it had no title")
-        logging.warning(f"{skipped_high_charge} because the charge was too high")
-        logging.warning(f"{skipped_no_title} because it had too little peaks")
-        return distinct
-
-    def write(
-        out_path: PathLike,
-        distinct_peptide_and_spectra: dict[str, list[Any]],  
-        peptide_list: list, 
-        type: str,
-    ):
-        written = 0
-        curr_pep = 0
-        with open(out_path, "w") as f_out:
-            for pep in peptide_list:
-                specs = distinct_peptide_and_spectra.get(pep, [])
-                if specs:
-                    written += len(specs)
-                    curr_pep += 1
-                    pyteomics.mgf.write(specs, f_out)
-        logging.info(f"Wrote {written} spectra (from {len(peptide_list)} peptides) to {out_path} for {type}")
 
     def split(
         self,
         input_dir: PathLike, 
-        allowed_amino_acids: str, 
-        min_peaks: int,
-        max_charge: int,
-        train_split: float, 
-        test_split: float, 
-        train_baseline: PathLike, 
-        test_baseline: PathLike, 
-        validation_baseline: PathLike, 
-        outdir: PathLike, 
-    ): 
-        distinct_peptide_and_spectra = self.collect_mgf_spectra_from_dir(input_dir, allowed_amino_acids, min_peaks, max_charge)
-        train_baseline_peps = get_pep_dict_mgf(train_baseline).keys()
-        test_baseline_peps = get_pep_dict_mgf(test_baseline).keys()
-        val_baseline_peps = get_pep_dict_mgf(validation_baseline).keys()
-
-        train_peps = []
-        test_peps = []
-        val_peps = []
-        extra_peps = []
+        output_dir: PathLike, 
+        train_ratio: float, 
+        test_ratio: float, 
+        val_ratio: float,
+    ):
+        os.mkdir(output_dir)
         
-        for peptide in distinct_peptide_and_spectra.keys():
-            if peptide in train_baseline_peps:
-                train_peps.append(peptide)
-            elif peptide in test_baseline_peps:
-                test_peps.append(peptide)
-            elif peptide in val_baseline_peps:
-                val_peps.append(peptide)
-            else:
-                extra_peps.append(peptide)
+        mgf_files = self.find_mgf_files(input_dir)
+        peptide_dict = get_pep_dict_mgf(mgf_files)
         
-        random.seed(self.random_seed)
-        random.shuffle(extra_peps)
-        val_split = 1.0 - train_split - test_split 
-
-        num_peptides = len(distinct_peptide_and_spectra)
-        n_train_target = int(train_split * num_peptides)
-        n_val_target = int(val_split * num_peptides)
-        n_test_target = int(test_split * num_peptides)
-
-        # Fill training
-        if len(train_peps) < n_train_target:
-            need = min(n_train_target - len(train_peps), len(extra_peps))
-            train_peps.extend(extra_peps[:need])
-            extra_peps = extra_peps[need:]
-
-        # Fill testing
-        if len(test_peps) < n_test_target:
-            need = min(n_test_target - len(test_peps), len(extra_peps))
-            test_peps.extend(extra_peps[:need])
-            extra_peps = extra_peps[need:]
-
-        # Fill validation
-        if len(val_peps) < n_val_target:
-            need = min(n_val_target - len(val_peps), len(extra_peps))
-            val_peps.extend(extra_peps[:need])
-            extra_peps = extra_peps[need:]
-
-        self.write(train_peps, )
-
+        train_peptides, val_peptides, test_peptides = self.split_peptides(
+            list(peptide_dict.keys()),
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+        )
+        
+        self.write_split_mgf(peptide_dict, train_peptides, output_dir / "train")
+        self.write_split_mgf(peptide_dict, val_peptides, output_dir / "val")
+        self.write_split_mgf(peptide_dict, test_peptides, output_dir / "test")
 
 @dataclasses.dataclass
 class DownsampleMS:
@@ -777,5 +692,6 @@ def main() -> None:
             "downsample-ms": DownsampleMS,
             "dump-residues": dump_residues,
             "graph-prec-cov": GraphPrecCov,
+            "train/test/validation-split": TrainTestValidationSplitting,
         }
     )

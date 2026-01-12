@@ -401,7 +401,7 @@ class TrainTestValidationSplitting:
         test_ratio: float, 
         val_ratio: float,
     ):
-        os.mkdir(output_dir)
+        output_dir.mkdir()
         
         mgf_files = self.find_mgf_files(input_dir)
         peptide_dict = get_pep_dict_mgf(mgf_files)

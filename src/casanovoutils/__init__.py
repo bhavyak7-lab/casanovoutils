@@ -261,6 +261,8 @@ class GraphPrecCov:
             figsize=(self.fig_width, self.fig_height), dpi=self.fig_dpi
         )
 
+        self.ax.set_xlim(0, 1)
+        self.ax.set_ylim(0, 1)
         self.ax.set_xlabel(self.ax_x_label)
         self.ax.set_ylabel(self.ax_y_label)
         self.ax.set_title(self.ax_title)
@@ -279,6 +281,7 @@ class GraphPrecCov:
         -------
         None
         """
+        self.fig.tight_layout()
         self.fig.savefig(save_path)
 
     def show(self) -> None:
@@ -546,7 +549,7 @@ def get_aa_matches(
         )
 
         ground_truth = np.array(ground_truth)
-        pred_aligned = np.full_like(ground_truth, None, dtype=str)
+        pred_aligned = np.full_like(ground_truth, None, dtype=object)
         pred_aligned[spectra_idx] = pred
         pred = pred_aligned
 

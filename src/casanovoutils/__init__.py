@@ -77,7 +77,7 @@ def prec_cov(
 
     precision = total_precision / total_coverage
     coverage = total_coverage / total_coverage[-1]
-    aupc = np.trapz(precision, coverage)
+    aupc = np.trapezoid(precision, coverage)
     return precision, coverage, aupc
 
 
@@ -123,6 +123,19 @@ def dump_residues(destination_path: PathLike) -> None:
     residues_path = pathlib.Path(__file__).parent / "residues.yaml"
     shutil.copy(residues_path, destination_path)
 
+def remove_mods(seq: str) -> str:
+    mods = [
+        "[Acetyl]-",
+        "[Oxidation]",
+        "[Carbamidomethyl]",
+        "[Cysteinyl]",
+    ]
+    for m in mods:
+        seq = seq.replace(m, "")
+    return seq
+
+def i_to_l(s: str) -> str:
+    return s.replace("I", "L")
 
 def get_aa_matches(
     mztab_path: PathLike | pd.DataFrame,
@@ -202,7 +215,7 @@ def get_aa_matches(
         with open(ground_truth_mgf) as f:
             for line in tqdm.tqdm(f, desc=f"Reading mgf file: {ground_truth_mgf}", unit="lines"):
                 if line.startswith("SEQ="):
-                    ground_truth.append(line.removeprefix("SEQ=").strip())
+                    ground_truth.append(i_to_l(remove_mods(line.removeprefix("SEQ=").strip())))
 
         spectra_idx = (
             psm_df["spectra_ref"].str[len("ms_run[1]:index=") :].apply(int).to_numpy()
@@ -213,9 +226,12 @@ def get_aa_matches(
         pred_aligned[spectra_idx] = pred
         pred = pred_aligned
 
+    pred_transformed = np.array([remove_mods(seq) if seq is not None else None for seq in pred])
+    pred_transformed = np.array([i_to_l(seq) if seq is not None else None for seq in pred_transformed]) 
+    
     aa_dict = get_residues(residues_path)
     aa_matches, _, _ = casanovo.denovo.evaluate.aa_match_batch(
-        tqdm.tqdm(pred, desc="Checking peptides", unit="peptide"),
+        tqdm.tqdm(pred_transformed, desc="Checking peptides", unit="peptide"),
         ground_truth,
         aa_dict,
     )

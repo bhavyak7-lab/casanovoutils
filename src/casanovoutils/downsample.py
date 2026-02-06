@@ -8,7 +8,7 @@ import fire
 import tqdm
 import pyteomics.mgf
 
-from ..casanovoutils import get_pep_dict_mgf
+from .prec_cov import get_pep_dict_mgf
 
 @dataclasses.dataclass
 class DownsampleMS:

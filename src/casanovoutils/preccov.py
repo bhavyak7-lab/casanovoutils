@@ -156,7 +156,16 @@ class GraphPrecCov:
         scores[pred != None] = psm_df[score_col].to_numpy(dtype=float)
         pep_correct = np.array([curr[1] for curr in aa_matches])
 
-        prec, cov, aupc = prec_cov(scores, pep_correct)
+        sort_idx = np.argsort(scores)[::-1]
+        scores_sorted = scores[sort_idx]
+        pep_correct_sorted = pep_correct[sort_idx]
+
+        prec, cov, aupc = prec_cov(scores_sorted, pep_correct_sorted)
+        
+        sort_idx = np.argsort(prec)[::-1]
+        prec = prec[sort_idx]
+        cov = cov[sort_idx]
+
         self.ax.plot(cov, prec, label=f"{name}: {aupc:.4f}")
         self.ax.legend(loc=self.legend_location, frameon=self.legend_border)
 
